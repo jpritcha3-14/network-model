@@ -19,7 +19,7 @@ class Host(threading.Thread):
     def __init__(self, threadID, router, waiting=False):
         threading.Thread.__init__(self)
         self.threadID = threadID
-        self._numTX = 3
+        self._numTX = 100
         self._rxQueue = collections.deque()
         self._rxLock = threading.Lock()
         self._txEvent = threading.Event()
@@ -39,8 +39,8 @@ class Host(threading.Thread):
         return self._rxQueue
      
     def readBuffer(self):
-        cur_message = []
         all_messages = []
+        cur_message = []
         with self._rxLock:
             while len(self._rxQueue) > 0:
                 cur_byte = self._rxQueue.popleft()
@@ -53,7 +53,7 @@ class Host(threading.Thread):
                     cur_message = []
                 else:
                     cur_message.append(cur_byte)
-        return all_messages
+        return all_messages 
 
     def createMessage(self):
         rxQueue = self._router.getRXQueue()
@@ -72,12 +72,13 @@ class Host(threading.Thread):
             rxQueue = self._clientList[destination].getRXQueue()
             for byte in message:
                 rxQueue.append(byte)
-            client.getTXEvent().set()
+        client.getTXEvent().set()
 
     def transmitTypeDecorator(self, messageType, toThreadID, destination=None):
-        if not destination:
+        if destination == None:
             destination = toThreadID
-        message = [ord(START_BYTE)] + [self.threadID] + [toThreadID] + [messageType] + [ord(STOP_BYTE)]
+        message = [ord(START_BYTE)] + [self.threadID] + [toThreadID] + [messageType.value] + [ord(STOP_BYTE)]
+        print(messageType.name, 'going to', destination)
         self.transmit(message, destination)
 
     def run(self):
@@ -85,23 +86,16 @@ class Host(threading.Thread):
             self._txEvent.wait(timeout=1)
 
         while self._numTX > 0 or not self._rxDone:
-
-            # wait if done transmitting and nothing in queue
-            while self._numTX < 0 and len(self._rxQueue) == 0:
-                if not self._txEvent.wait(timeout=1):
-                    print('timeout! thread', slef.threadID)
+            self._txEvent.clear()
 
             print('Running Host', self.threadID)  
             if self._numTX > 0:
                 self._numTX -= 1
-                print('thread', self.threadID, 'transmitting')
                 self.transmit(self.createMessage(), 0)
-                self._txEvent.wait(timeout=1)
-                print('thread', self.threadID, 'awake after transmit')
+            else:
+                self._router.getTXEvent().set()
             messages = self.readBuffer()
             for message in messages:
-                if len(message) == 0:
-                    continue
                 message_from = message[1]
                 message_to = message[2]
                 message_type = message[3]
@@ -109,14 +103,13 @@ class Host(threading.Thread):
                     self._rxDone = True
                 if message_type == Type.MESSAGE.value: 
                     print('From:', message_from, 'To:', message_to, 'Message:', ''.join(list(map(chr, message[4:-2]))))
-                    #self.transmitTypeDecorator(Type.ACK.value, message_from, self._router.threadID)
-                self._txEvent.wait(timeout=1)
-                    
+                    #self.transmitTypeDecorator(Type.ACK, message_from, self._router.threadID)
             if (self._numTX == 0):
-                self.transmitTypeDecorator(Type.DONE.value, self._router.threadID)
+                self.transmitTypeDecorator(Type.DONE, self._router.threadID)
                 self._numTX -= 1
                 print('Thread ', self.threadID, 'sent done to router')
-                self._txEvent.wait(timeout=1)
+                
+            self._txEvent.wait(timeout=1)
 
         print('Stopping thread', self.threadID)
 
@@ -135,39 +128,35 @@ class Router(Host):
             self._txEvent.wait(timeout=1)
          
         while len(self._doneTX) < self.numClients() or len(self._rxQueue) > 0:
-            # if queue is empty, wait for messages 
-            while len(self._rxQueue) == 0:
-                self._txEvent.wait(timeout=1)
-                
+            self._txEvent.clear() 
+
             print('Running Router, queue length:', len(self.getRXQueue()), 'done:', len(self._doneTX))
             messages = self.readBuffer()
             for message in messages:
-                #print(message)
                 if message[3] == Type.DONE.value:
                     print('Received DONE from thread', message[1])
                     self._doneTX.add(message[1])
                     if len(self._doneTX) < self.numClients():
                         wakethreadID = random.choice(list(set(range(1,self.numClients()+1)) - self._doneTX))
                         self._clientList[wakethreadID].getTXEvent().set()
-                        self._txEvent.wait(timeout=1)
                 else:
-                    #print('router transmitting to Host', message[2])
+                    print('router transmitting to Host', message[2])
                     self.transmit(message, message[2])
-                    self._txEvent.wait(timeout=1)
+
+            print('Router should be waiting')
+            self._txEvent.wait(timeout=1)
 
         for clientID in range(len(self._clientList)):
-            self.transmitTypeDecorator(Type.DONE.value, clientID)
+            self.transmitTypeDecorator(Type.DONE, clientID)
         
         print('Router DONE!')
  
-numHosts = 4   
+numHosts = 5   
 threadList = [None]*(numHosts+1)
-# need to have router activate a remaining host after it recieves a done message
 
-threadList[0] = Router(0,threadList)
+threadList[0] = Router(0,threadList, True)
 for i in range(1,numHosts):
     threadList[i] = Host(i, threadList[0], True)
 threadList[numHosts] = Host(numHosts, threadList[0])
-print(threadList)
 for thread in threadList:
     thread.start()
